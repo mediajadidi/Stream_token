@@ -1,0 +1,7 @@
+name = "camel-token-breaker"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+[env.production]
+# Add your custom domain if needed
+# routes = [{ pattern = "stream.yourdomain.com/*", zone_name = "yourdomain.com" }]
