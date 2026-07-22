@@ -13,140 +13,221 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
     
-    // 🔬 Deep scan for live game
-    if (path === '/deepscan') {
+    // 🚀 ATTACK VECTOR 1: Try distributor API with different patterns
+    if (path === '/attack') {
       const gameUrl = url.searchParams.get('url');
       if (!gameUrl) return error('Missing ?url=', 400, corsHeaders);
       
       const match = gameUrl.match(/\/live\/([a-zA-Z0-9]+)/);
       const gameId = match ? match[1] : '';
       
-      const results = {
-        gameId,
-        gameUrl,
-        discoveries: []
-      };
+      const results = { gameId, findings: {} };
       
-      // 1. Get page with RSC header
-      const pageResp = await fetch(gameUrl, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Accept': 'text/html,application/xhtml+xml',
-          'RSC': '1'
-        }
-      });
-      
-      const html = await pageResp.text();
-      
-      // 2. Search for video/stream data in Next.js payloads
-      const rscPattern = /self\.__next_f\.push\(\[1,\"([^\"]+)\"\]\)/g;
-      let rscMatch;
-      const rscPayloads = [];
-      
-      while ((rscMatch = rscPattern.exec(html)) !== null) {
-        try {
-          const decoded = rscMatch[1]
-            .replace(/\\"/g, '"')
-            .replace(/\\n/g, '')
-            .replace(/\\\\/g, '\\');
-          rscPayloads.push(decoded);
-        } catch (e) {}
-      }
-      
-      results.rscPayloadCount = rscPayloads.length;
-      
-      // 3. Search in all payloads for stream info
-      for (const payload of rscPayloads) {
-        // Look for m3u8 URLs
-        const m3u8Match = payload.match(/https?:\/\/[^"'\s]*\.m3u8[^"'\s]*/gi);
-        if (m3u8Match) {
-          results.discoveries.push({ source: 'rsc_payload', m3u8: m3u8Match });
-        }
-        
-        // Look for stream/room data
-        const roomMatch = payload.match(/roomLiveVideo[^}]*/gi);
-        if (roomMatch) {
-          results.discoveries.push({ source: 'rsc_payload', roomData: roomMatch });
-        }
-        
-        // Look for liveplay URLs
-        const liveplayMatch = payload.match(/https?:\/\/[^"'\s]*liveplay[^"'\s]*/gi);
-        if (liveplayMatch) {
-          results.discoveries.push({ source: 'rsc_payload', liveplay: liveplayMatch });
-        }
-      }
-      
-      // 4. Search entire HTML for any stream URL
-      const allStreamUrls = html.match(/https?:\/\/[^"'\s<>]*(?:m3u8|liveplay|stream|video)[^"'\s<>]*/gi) || [];
-      results.streamUrlsFound = [...new Set(allStreamUrls)].slice(0, 20);
-      
-      // 5. Search for distributor API patterns
-      const apiMatches = html.match(/https?:\/\/[^"'\s<>]*distributor[^"'\s<>]*/gi) || [];
-      results.apiEndpoints = [...new Set(apiMatches)];
-      
-      // 6. Search for WebSocket connections
-      const wsMatches = html.match(/wss?:\/\/[^"'\s<>]+/gi) || [];
-      results.webSocketUrls = [...new Set(wsMatches)];
-      
-      return new Response(JSON.stringify(results, null, 2), {
-        headers: { 'Content-Type': 'application/json', ...corsHeaders }
-      });
-    }
-    
-    // 🎬 STREAM PROXY - Now with Next.js awareness
-    if (path.startsWith('/proxy/')) {
-      const gamePath = path.replace('/proxy/', '');
-      const gameUrl = 'https://www.camel1.tv/' + gamePath;
-      const match = gameUrl.match(/\/live\/([a-zA-Z0-9]+)/);
-      const gameId = match ? match[1] : '';
-      
-      // Get page
+      // Fetch page first to get any tokens
       const pageResp = await fetch(gameUrl, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
           'Accept': 'text/html,application/xhtml+xml'
         }
       });
-      
       const html = await pageResp.text();
       
-      // Strategy 1: Extract from RSC payloads
-      const rscPattern = /self\.__next_f\.push\(\[1,\"([^\"]+)\"\]\)/g;
-      let rscMatch;
+      // Extract any JWT or token
+      const tokenMatch = html.match(/[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}/);
+      results.jwtFound = tokenMatch ? tokenMatch[0] : null;
+      
+      // Extract any base64 encoded data
+      const b64Matches = html.match(/[A-Za-z0-9+/]{50,}={0,2}/g) || [];
+      results.base64Blobs = b64Matches.length;
+      
+      // Try different distributor API patterns
+      const apiPatterns = [
+        `https://distributor.cameltv.live/api/stream/${gameId}`,
+        `https://distributor.cameltv.live/api/v1/stream/${gameId}`,
+        `https://distributor.cameltv.live/stream/${gameId}/m3u8`,
+        `https://distributor.cameltv.live/stream/info/${gameId}`,
+        `https://distributor.cameltv.live/match/${gameId}/stream`,
+        `https://distributor.cameltv.live/room/${gameId}`,
+        `https://distributor.cameltv.live/room/${gameId}/stream`,
+        `https://distributor.cameltv.live/live/${gameId}`,
+      ];
+      
+      const headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Origin': 'https://www.camel1.tv',
+        'Referer': gameUrl,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      };
+      
+      if (results.jwtFound) {
+        headers['Authorization'] = `Bearer ${results.jwtFound}`;
+      }
+      
+      for (const apiUrl of apiPatterns) {
+        try {
+          const resp = await fetch(apiUrl, { headers });
+          const text = await resp.text();
+          let data;
+          try { data = JSON.parse(text); } catch { data = text.substring(0, 300); }
+          
+          if (resp.status !== 404 && resp.status !== 500) {
+            results.findings[apiUrl] = { status: resp.status, data };
+          }
+        } catch (e) {
+          // skip
+        }
+      }
+      
+      // Try WebSocket connection params
+      results.wsEndpoint = 'wss://mimo-ws.cameltv.live/ws/connect';
+      results.possibleRoomId = gameId;
+      
+      return new Response(JSON.stringify(results, null, 2), {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    }
+    
+    // 🔌 WebSocket Bridge (experimental)
+    if (path === '/ws-bridge') {
+      const gameId = url.searchParams.get('id');
+      if (!gameId) return error('Missing ?id=', 400, corsHeaders);
+      
+      // Create WebSocket connection
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
+      
+      // Connect to mimo WebSocket
+      const ws = new WebSocket('wss://mimo-ws.cameltv.live/ws/connect');
+      
+      ws.accept();
+      
+      // Handle messages
+      server.accept();
+      
+      ws.addEventListener('message', (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          server.send(JSON.stringify({ type: 'mimo_response', data }));
+        } catch {
+          server.send(event.data);
+        }
+      });
+      
+      server.addEventListener('message', (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          
+          // Join room
+          if (data.type === 'join') {
+            ws.send(JSON.stringify({
+              type: 'join_room',
+              roomId: gameId,
+              channel: 'live_stream'
+            }));
+          }
+        } catch {}
+      });
+      
+      // Send initial join message
+      setTimeout(() => {
+        ws.send(JSON.stringify({
+          type: 'join_room',
+          roomId: gameId,
+          channel: 'live_stream'
+        }));
+      }, 500);
+      
+      return new Response(null, {
+        status: 101,
+        webSocket: client
+      });
+    }
+    
+    // 🎬 PROXY with all strategies
+    if (path.startsWith('/proxy/')) {
+      const gamePath = path.replace('/proxy/', '');
+      const gameUrl = 'https://www.camel1.tv/' + gamePath;
+      const match = gameUrl.match(/\/live\/([a-zA-Z0-9]+)/);
+      const gameId = match ? match[1] : '';
+      
+      // Strategy 1: Get page with full headers
+      const pageResp = await fetch(gameUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache'
+        }
+      });
+      
+      const html = await pageResp.text();
       let m3u8Url = null;
       
-      while ((rscMatch = rscPattern.exec(html)) !== null) {
-        try {
-          const decoded = rscMatch[1].replace(/\\"/g, '"').replace(/\\n/g, '');
-          const m3u8Match = decoded.match(/https?:\/\/[^"'\s]*\.m3u8[^"'\s]*/i);
-          if (m3u8Match) {
-            m3u8Url = m3u8Match[0];
+      // Strategy A: Find in script tags
+      const scriptRegex = /<script[^>]*>([\s\S]*?)<\/script>/gi;
+      let scriptMatch;
+      while ((scriptMatch = scriptRegex.exec(html)) !== null) {
+        const script = scriptMatch[1];
+        if (script.includes('.m3u8') || script.includes('liveplay')) {
+          const urlMatch = script.match(/https?:\/\/[^"'\s]*\.m3u8[^"'\s]*/i);
+          if (urlMatch) {
+            m3u8Url = urlMatch[0];
             break;
           }
-        } catch (e) {}
+        }
       }
       
-      // Strategy 2: Extract from HTML directly
+      // Strategy B: Search entire HTML
       if (!m3u8Url) {
-        const htmlMatch = html.match(/https?:\/\/[^"'\s<>]*\.m3u8[^"'\s<>]*/i);
-        if (htmlMatch) m3u8Url = htmlMatch[0];
+        const allM3u8 = html.match(/https?:\/\/[^"'\s<>]*\.m3u8[^"'\s<>]*/gi);
+        if (allM3u8) m3u8Url = allM3u8[0];
       }
       
-      // Strategy 3: Try to find liveplay pattern  
+      // Strategy C: Check for camel4.live pattern
       if (!m3u8Url) {
-        const lpMatch = html.match(/https?:\/\/[^"'\s<>]*liveplay[^"'\s<>]*\.m3u8[^"'\s<>]*/i);
-        if (lpMatch) m3u8Url = lpMatch[0];
+        const camelMatch = html.match(/https?:\/\/[^"'\s<>]*camel\d*\.live[^"'\s<>]*/gi);
+        if (camelMatch) {
+          for (const u of camelMatch) {
+            if (u.includes('.m3u8')) {
+              m3u8Url = u;
+              break;
+            }
+          }
+        }
       }
       
       if (m3u8Url) {
         return await serveM3u8(m3u8Url, corsHeaders, url.origin);
       }
       
+      // No m3u8 found - try distributor API as last resort
+      try {
+        const distResp = await fetch(`https://distributor.cameltv.live/api/stream/${gameId}`, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0',
+            'Origin': 'https://www.camel1.tv',
+            'Referer': gameUrl
+          }
+        });
+        
+        if (distResp.ok) {
+          const data = await distResp.json();
+          if (data.url || data.m3u8 || data.stream_url) {
+            m3u8Url = data.url || data.m3u8 || data.stream_url;
+            return await serveM3u8(m3u8Url, corsHeaders, url.origin);
+          }
+        }
+      } catch (e) {}
+      
       return new Response(JSON.stringify({
-        error: 'No m3u8 found in page',
+        error: 'Could not find stream URL',
         gameId,
-        suggestion: `Try: ${url.origin}/deepscan?url=${encodeURIComponent(gameUrl)}`
-      }), {
+        pageSize: html.length,
+        hasWebSocket: html.includes('mimo-ws'),
+        tryAttack: `${url.origin}/attack?url=${encodeURIComponent(gameUrl)}`
+      }, null, 2), {
         status: 404,
         headers: { 'Content-Type': 'application/json', ...corsHeaders }
       });
@@ -169,9 +250,11 @@ export default {
     
     return new Response(JSON.stringify({
       active: true,
+      gameUrl: 'https://www.camel1.tv/football/atletico-mineiro-mg-vs-bahia-ba/live/965mkyhk2lpjr1g',
       endpoints: {
-        deepscan: '/deepscan?url=GAME_URL',
-        proxy: '/proxy/PATH_TO_GAME'
+        attack: '/attack?url=GAME_URL',
+        proxy: '/proxy/PATH',
+        wsBridge: '/ws-bridge?id=GAME_ID'
       }
     }), {
       headers: { 'Content-Type': 'application/json', ...corsHeaders }
@@ -223,4 +306,4 @@ function error(msg, status, corsHeaders) {
     status,
     headers: { 'Content-Type': 'application/json', ...corsHeaders }
   });
-    }
+        }
