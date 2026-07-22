@@ -170,4 +170,4 @@ function error(msg, status, corsHeaders) {
     status,
     headers: { 'Content-Type': 'application/json', ...corsHeaders }
   });
-    }
+          }
