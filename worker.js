@@ -50,28 +50,17 @@ export default {
             border: 1px solid #333;
             border-radius: 0 0 12px 12px;
             padding: 15px;
-            max-height: 200px;
+            max-height: 250px;
             overflow-y: auto;
             font-family: monospace;
-            font-size: 12px;
+            font-size: 11px;
             color: #0f0;
         }
-        .log-line { margin: 2px 0; }
+        .log-line { margin: 2px 0; word-break: break-all; }
         .log-line.error { color: #f44; }
         .log-line.success { color: #0f0; }
         .log-line.warn { color: #fa0; }
         .log-line.info { color: #88f; }
-        .btn {
-            display: block;
-            margin: 10px auto;
-            padding: 12px 24px;
-            background: #e94560;
-            color: #fff;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            font-size: 14px;
-        }
     </style>
 </head>
 <body>
@@ -102,6 +91,7 @@ export default {
         
         let foundStreamUrl = null;
         let hls = null;
+        let authToken = null;
         
         function log(msg, type = 'info') {
             const line = document.createElement('div');
@@ -110,7 +100,7 @@ export default {
             line.textContent = '[' + time + '] ' + msg;
             logEl.appendChild(line);
             logEl.scrollTop = logEl.scrollHeight;
-            console.log(msg);
+            console.log(type, msg);
         }
         
         function setStatus(msg, isError = false) {
@@ -118,96 +108,77 @@ export default {
             statusEl.style.color = isError ? '#f44' : '#0f0';
         }
         
-        // 🔍 Check if URL is a direct stream or needs more processing
-        async function checkAndProcessUrl(url) {
-            log('📋 Checking URL: ' + url.substring(0, 80) + '...', 'info');
+        // 🔑 Extract JWT/Auth token from page
+        async function extractAuthToken() {
+            log('🔑 Looking for auth token...', 'info');
             
             try {
-                const resp = await fetch(url, {
+                // Fetch the game page
+                const resp = await fetch(GAME_URL, {
+                    credentials: 'include',
                     headers: {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                        'Origin': 'https://www.camel1.tv',
-                        'Referer': GAME_URL,
-                        'Accept': '*/*'
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                     }
                 });
                 
-                const contentType = resp.headers.get('content-type') || '';
-                const text = await resp.text();
+                const html = await resp.text();
                 
-                log('  Status: ' + resp.status + ', Type: ' + contentType + ', Size: ' + text.length, 'info');
-                
-                // Check if it's M3U8
-                if (text.includes('#EXTM3U') || text.includes('#EXT-X-')) {
-                    log('✅ This IS an M3U8 playlist!', 'success');
-                    return { type: 'm3u8', url: url, content: text };
+                // Look for JWT tokens
+                const jwtMatch = html.match(/[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}/);
+                if (jwtMatch) {
+                    authToken = jwtMatch[0];
+                    log('✅ Found JWT: ' + authToken.substring(0, 50) + '...', 'success');
+                    return authToken;
                 }
                 
-                // Check if it's JSON with stream info
-                if (contentType.includes('json') || text.startsWith('{')) {
-                    try {
-                        const data = JSON.parse(text);
-                        log('  JSON Response: ' + JSON.stringify(data).substring(0, 300), 'info');
-                        
-                        // Look for stream URL in JSON
-                        const jsonStr = JSON.stringify(data);
-                        const m3u8Match = jsonStr.match(/https?:\\/\\/[^"'\s]*\.m3u8[^"'\s]*/i);
-                        if (m3u8Match) {
-                            log('✅ Found m3u8 URL in JSON response!', 'success');
-                            return await checkAndProcessUrl(m3u8Match[0]);
-                        }
-                        
-                        // Check for other URL fields
-                        for (const key of ['url', 'stream_url', 'm3u8', 'hls', 'source', 'play_url', 'video_url']) {
-                            if (data[key] && typeof data[key] === 'string' && data[key].startsWith('http')) {
-                                log('✅ Found ' + key + ' in JSON, following...', 'success');
-                                return await checkAndProcessUrl(data[key]);
-                            }
-                        }
-                    } catch(e) {}
+                // Look for bearer tokens
+                const bearerMatch = html.match(/["'](?:token|accessToken|auth)["']\s*[:=]\s*["']([^"']+)["']/i);
+                if (bearerMatch) {
+                    authToken = bearerMatch[1];
+                    log('✅ Found token in page: ' + authToken.substring(0, 30) + '...', 'success');
+                    return authToken;
                 }
                 
-                // Check for redirect URL in response
-                if (text.includes('http') && text.length < 500) {
-                    const urlMatch = text.match(/https?:\\/\\/[^"'\s<>]+/i);
-                    if (urlMatch && urlMatch[0] !== url) {
-                        log('🔄 Following redirect URL...', 'warn');
-                        return await checkAndProcessUrl(urlMatch[0]);
+                // Look in Next.js data
+                const nextData = html.match(/self\.__next_f\.push\(\[1,"([^"]+)"\]\)/g);
+                if (nextData) {
+                    for (const match of nextData) {
+                        const tokenMatch = match.match(/[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}/);
+                        if (tokenMatch) {
+                            authToken = tokenMatch[0];
+                            log('✅ Found JWT in Next.js data', 'success');
+                            return authToken;
+                        }
                     }
                 }
                 
-                // Look for m3u8 in text response
-                const m3u8Match = text.match(/https?:\\/\\/[^"'\s<>]*\.m3u8[^"'\s<>]*/i);
-                if (m3u8Match) {
-                    log('✅ Found m3u8 URL embedded in response!', 'success');
-                    return await checkAndProcessUrl(m3u8Match[0]);
+                // Look for localStorage/sessionStorage references
+                const storageMatch = html.match(/localStorage\.(?:getItem|setItem)\s*\(\s*["']([^"']+)["']/g);
+                if (storageMatch) {
+                    log('Found storage keys: ' + storageMatch.join(', '), 'info');
                 }
                 
-                log('  ⚠️ Could not find stream in this response', 'warn');
-                return null;
+                log('⚠️ No auth token found in page', 'warn');
                 
             } catch(e) {
-                log('  ❌ Error: ' + e.message, 'error');
-                return null;
+                log('❌ Error extracting token: ' + e.message, 'error');
             }
+            
+            return null;
         }
         
-        // 🎬 Play the stream
+        // 🎬 Play stream
         function playStream(url) {
-            if (foundStreamUrl === url) return; // Already playing this
+            if (foundStreamUrl === url) return;
             foundStreamUrl = url;
             
-            log('🎬 Playing: ' + url, 'success');
+            log('🎬 PLAYING: ' + url, 'success');
             setStatus('Starting playback...');
             
             loaderEl.style.display = 'none';
             video.classList.add('active');
             
-            // Clean up previous HLS instance
-            if (hls) {
-                hls.destroy();
-                hls = null;
-            }
+            if (hls) { hls.destroy(); hls = null; }
             
             if (Hls.isSupported()) {
                 hls = new Hls({
@@ -216,7 +187,15 @@ export default {
                     manifestLoadingMaxRetry: 10,
                     manifestLoadingRetryDelay: 1000,
                     levelLoadingMaxRetry: 10,
-                    fragLoadingMaxRetry: 10
+                    fragLoadingMaxRetry: 10,
+                    xhrSetup: function(xhr, url) {
+                        // Add auth if we have it
+                        if (authToken) {
+                            xhr.setRequestHeader('Authorization', 'Bearer ' + authToken);
+                        }
+                        xhr.setRequestHeader('Origin', 'https://www.camel1.tv');
+                        xhr.setRequestHeader('Referer', GAME_URL);
+                    }
                 });
                 
                 hls.loadSource(url);
@@ -225,28 +204,17 @@ export default {
                 hls.on(Hls.Events.MANIFEST_PARSED, () => {
                     log('✅ Playing LIVE!', 'success');
                     setStatus('✅ Streaming LIVE');
-                    video.play().catch(e => log('Autoplay blocked: ' + e.message, 'warn'));
+                    video.play().catch(e => log('Autoplay: ' + e.message, 'warn'));
                 });
                 
                 hls.on(Hls.Events.ERROR, (event, data) => {
                     if (data.fatal) {
-                        log('❌ Fatal HLS error: ' + data.type + ' - ' + (data.error?.message || ''), 'error');
-                        
+                        log('❌ HLS Error: ' + data.type, 'error');
                         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-                            log('🔄 Retrying...', 'warn');
-                            setTimeout(() => {
-                                if (hls) hls.startLoad();
-                            }, 2000);
-                        } else {
-                            // Try to recover
-                            log('🔄 Attempting recovery...', 'warn');
-                            hls.recoverMediaError();
+                            log('🔄 Retrying in 2s...', 'warn');
+                            setTimeout(() => { if (hls) hls.startLoad(); }, 2000);
                         }
                     }
-                });
-                
-                hls.on(Hls.Events.LEVEL_LOADED, (event, data) => {
-                    log('📊 Level loaded: ' + (data.level === -1 ? 'auto' : data.level), 'info');
                 });
                 
             } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
@@ -255,167 +223,193 @@ export default {
                     log('✅ Native HLS playing!', 'success');
                     setStatus('✅ Streaming LIVE');
                 });
-                video.play().catch(e => log('Autoplay blocked: ' + e.message, 'warn'));
-            } else {
-                log('❌ HLS not supported in this browser', 'error');
-                setStatus('Browser does not support HLS', true);
+                video.play().catch(e => log('Autoplay: ' + e.message, 'warn'));
             }
         }
         
-        // Strategy 1: Try distributor API with proper processing
-        async function tryDistributorAPI() {
-            log('🔍 Strategy 1: Distributor API...', 'info');
+        // Check URL response
+        async function checkUrl(url) {
+            const headers = {
+                'User-Agent': 'Mozilla/5.0',
+                'Origin': 'https://www.camel1.tv',
+                'Referer': GAME_URL,
+                'Accept': '*/*'
+            };
             
-            const endpoints = [
-                'https://distributor.cameltv.live/stream/' + GAME_ID,
-                'https://distributor.cameltv.live/api/stream/' + GAME_ID,
-                'https://distributor.cameltv.live/api/v1/stream/' + GAME_ID,
-                'https://distributor.cameltv.live/room/' + GAME_ID + '/stream',
-                'https://distributor.cameltv.live/live/' + GAME_ID + '/m3u8',
+            if (authToken) {
+                headers['Authorization'] = 'Bearer ' + authToken;
+            }
+            
+            try {
+                const resp = await fetch(url, { headers });
+                const text = await resp.text();
+                
+                // Is it M3U8?
+                if (text.includes('#EXTM3U') || text.includes('#EXT-X-')) {
+                    log('✅ Direct M3U8 found!', 'success');
+                    return { type: 'm3u8', url };
+                }
+                
+                // Is it JSON with stream info?
+                if (text.startsWith('{')) {
+                    try {
+                        const data = JSON.parse(text);
+                        log('  JSON: ' + JSON.stringify(data).substring(0, 200), 'info');
+                        
+                        // Search for stream URL in JSON
+                        const jsonStr = JSON.stringify(data);
+                        const m3u8Match = jsonStr.match(/https?:\\/\\/[^"'\s]*\.m3u8[^"'\s]*/i);
+                        if (m3u8Match) return { type: 'm3u8', url: m3u8Match[0] };
+                        
+                        // Check known fields
+                        for (const key of ['stream_url', 'url', 'm3u8', 'hls', 'source', 'play_url']) {
+                            if (data[key]?.startsWith('http')) {
+                                return await checkUrl(data[key]);
+                            }
+                        }
+                    } catch(e) {}
+                }
+                
+                // Check for m3u8 in text
+                const m3u8InText = text.match(/https?:\\/\\/[^"'\s<>]*\.m3u8[^"'\s<>]*/i);
+                if (m3u8InText) return { type: 'm3u8', url: m3u8InText[0] };
+                
+            } catch(e) {
+                log('  Error: ' + e.message, 'error');
+            }
+            return null;
+        }
+        
+        // Strategy 1: Intercept page network
+        function interceptNetwork() {
+            log('🔍 Strategy 1: Intercepting page requests...', 'info');
+            
+            // Override fetch
+            const origFetch = window.fetch;
+            window.fetch = async function(...args) {
+                const requestUrl = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+                const resp = await origFetch.apply(this, args);
+                
+                if (requestUrl.includes('.m3u8') || requestUrl.includes('liveplay') || requestUrl.includes('txSecret')) {
+                    log('🎯 Intercepted: ' + requestUrl, 'success');
+                    playStream(requestUrl);
+                }
+                
+                return resp;
+            };
+            
+            // Load game in hidden iframe
+            if (GAME_URL) {
+                const iframe = document.createElement('iframe');
+                iframe.src = GAME_URL;
+                iframe.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;';
+                iframe.onload = () => log('✅ Game page loaded in iframe', 'success');
+                document.body.appendChild(iframe);
+            }
+        }
+        
+        // Strategy 2: Try WebSocket with auth
+        async function tryWebSocket() {
+            log('🔍 Strategy 2: WebSocket with auth...', 'info');
+            
+            try {
+                const wsUrl = authToken 
+                    ? 'wss://mimo-ws.cameltv.live/ws/connect?token=' + encodeURIComponent(authToken)
+                    : 'wss://mimo-ws.cameltv.live/ws/connect';
+                
+                const ws = new WebSocket(wsUrl);
+                
+                ws.onopen = () => {
+                    log('✅ WebSocket connected', 'success');
+                    
+                    const joinMsg = {
+                        type: 'join_room',
+                        roomId: GAME_ID,
+                        channel: 'live_stream'
+                    };
+                    
+                    if (authToken) joinMsg.token = authToken;
+                    
+                    ws.send(JSON.stringify(joinMsg));
+                    log('📤 ' + JSON.stringify(joinMsg), 'info');
+                };
+                
+                ws.onmessage = (event) => {
+                    log('📥 WS: ' + event.data.substring(0, 300), 'info');
+                    
+                    try {
+                        const data = JSON.parse(event.data);
+                        
+                        // Look for stream URLs
+                        const dataStr = JSON.stringify(data);
+                        const m3u8Match = dataStr.match(/https?:\\/\\/[^"'\s]*\.m3u8[^"'\s]*/i);
+                        if (m3u8Match) {
+                            playStream(m3u8Match[0]);
+                            return;
+                        }
+                        
+                        // Check for stream_url
+                        if (data.stream_url || data.url || data.m3u8) {
+                            const streamUrl = data.stream_url || data.url || data.m3u8;
+                            checkUrl(streamUrl).then(result => {
+                                if (result) playStream(result.url);
+                            });
+                        }
+                    } catch(e) {}
+                };
+                
+                ws.onerror = () => log('WebSocket error', 'error');
+                ws.onclose = (e) => log('WS closed: ' + e.code, 'warn');
+                
+            } catch(e) {
+                log('WS exception: ' + e.message, 'error');
+            }
+        }
+        
+        // Strategy 3: Try common stream URL patterns directly
+        async function tryDirectPatterns() {
+            log('🔍 Strategy 3: Direct stream patterns...', 'info');
+            
+            // Common CDN patterns for camel
+            const patterns = [
+                'https://liveplay.camel4.live/live/' + GAME_ID + '.m3u8',
+                'https://liveplay1.camel4.live/live/' + GAME_ID + '.m3u8',
+                'https://liveplay.cameltv.live/live/' + GAME_ID + '.m3u8',
+                'https://stream.cameltv.live/' + GAME_ID + '/index.m3u8',
+                'https://cdn.cameltv.live/stream/' + GAME_ID + '/index.m3u8',
             ];
             
-            for (const endpoint of endpoints) {
-                log('  Trying: ' + endpoint, 'info');
-                const result = await checkAndProcessUrl(endpoint);
-                if (result && result.type === 'm3u8') {
+            for (const url of patterns) {
+                const result = await checkUrl(url);
+                if (result) {
                     playStream(result.url);
                     return;
                 }
             }
         }
         
-        // Strategy 2: Monitor page network
-        async function monitorPageNetwork() {
-            log('🔍 Strategy 2: Monitoring page network...', 'info');
-            
-            // Override fetch
-            const originalFetch = window.fetch;
-            window.fetch = async function(...args) {
-                const requestUrl = typeof args[0] === 'string' ? args[0] : args[0].url;
-                const response = await originalFetch.apply(this, args);
-                
-                if (typeof requestUrl === 'string' && 
-                    (requestUrl.includes('.m3u8') || 
-                     requestUrl.includes('liveplay') || 
-                     requestUrl.includes('camel4.live') ||
-                     requestUrl.includes('txSecret'))) {
-                    
-                    log('🎯 Intercepted stream URL: ' + requestUrl, 'success');
-                    playStream(requestUrl);
-                }
-                
-                return response;
-            };
-            
-            // Override XMLHttpRequest
-            const origOpen = XMLHttpRequest.prototype.open;
-            XMLHttpRequest.prototype.open = function(method, requestUrl) {
-                this.addEventListener('load', function() {
-                    if (requestUrl.includes('.m3u8') || 
-                        requestUrl.includes('liveplay') ||
-                        requestUrl.includes('txSecret')) {
-                        log('🎯 XHR intercepted: ' + requestUrl, 'success');
-                        playStream(requestUrl);
-                    }
-                });
-                return origOpen.apply(this, arguments);
-            };
-            
-            // Load game in iframe
-            if (GAME_URL) {
-                const iframe = document.createElement('iframe');
-                iframe.src = GAME_URL;
-                iframe.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;';
-                iframe.onload = () => log('✅ Game page loaded', 'success');
-                iframe.onerror = () => log('❌ Failed to load game page', 'error');
-                document.body.appendChild(iframe);
-            }
-        }
-        
-        // Strategy 3: WebSocket
-        async function tryWebSocket() {
-            log('🔍 Strategy 3: WebSocket...', 'info');
-            
-            try {
-                const ws = new WebSocket('wss://mimo-ws.cameltv.live/ws/connect');
-                
-                ws.onopen = () => {
-                    log('✅ WebSocket connected', 'success');
-                    
-                    // Send join room
-                    const joinMsg = JSON.stringify({
-                        type: 'join_room',
-                        roomId: GAME_ID,
-                        channel: 'live_stream'
-                    });
-                    ws.send(joinMsg);
-                    log('📤 Sent: ' + joinMsg, 'info');
-                    
-                    // Also try get_stream message
-                    const getStreamMsg = JSON.stringify({
-                        type: 'get_stream',
-                        roomId: GAME_ID
-                    });
-                    ws.send(getStreamMsg);
-                    log('📤 Sent: ' + getStreamMsg, 'info');
-                };
-                
-                ws.onmessage = (event) => {
-                    log('📥 WS: ' + event.data.substring(0, 200), 'info');
-                    
-                    try {
-                        const data = JSON.parse(event.data);
-                        
-                        // Search for stream URLs
-                        const dataStr = JSON.stringify(data);
-                        const m3u8Match = dataStr.match(/https?:\\/\\/[^"'\s]*\.m3u8[^"'\s]*/i);
-                        if (m3u8Match) {
-                            log('🎯 Found m3u8 in WS response!', 'success');
-                            playStream(m3u8Match[0]);
-                            return;
-                        }
-                        
-                        // Check common fields
-                        for (const key of ['stream_url', 'url', 'm3u8', 'hls', 'source']) {
-                            if (data[key] && typeof data[key] === 'string' && data[key].startsWith('http')) {
-                                checkAndProcessUrl(data[key]).then(result => {
-                                    if (result && result.type === 'm3u8') {
-                                        playStream(result.url);
-                                    }
-                                });
-                                return;
-                            }
-                        }
-                    } catch(e) {}
-                };
-                
-                ws.onerror = (e) => log('❌ WebSocket error', 'error');
-                ws.onclose = (e) => log('🔌 WebSocket closed: code=' + e.code, 'warn');
-                
-            } catch(e) {
-                log('❌ WebSocket exception: ' + e.message, 'error');
-            }
-        }
-        
-        // Start all strategies
+        // Main
         async function start() {
-            log('🚀 Starting Ultimate Token Breaker...', 'info');
-            log('Game ID: ' + GAME_ID, 'info');
-            log('Game URL: ' + GAME_URL, 'info');
+            log('🚀 Token Breaker Ultimate', 'info');
+            log('Game: ' + GAME_ID, 'info');
+            setStatus('Extracting auth token...');
+            
+            // First get auth token
+            await extractAuthToken();
+            
             setStatus('Searching for stream...');
             
-            // Run strategies
-            tryDistributorAPI();
-            monitorPageNetwork();
+            // Run all strategies
+            interceptNetwork();
             tryWebSocket();
+            tryDirectPatterns();
             
-            // Timeout
             setTimeout(() => {
                 if (!foundStreamUrl) {
-                    log('⚠️ No stream found after 45 seconds', 'warn');
-                    setStatus('Stream not found. Game may not be live or requires authentication.', true);
+                    log('⚠️ Stream not found after 60s', 'warn');
+                    setStatus('Not found. Try opening the game on camel1.tv first to get authenticated.', true);
                 }
-            }, 45000);
+            }, 60000);
         }
         
         start();
@@ -424,18 +418,12 @@ export default {
 </html>`;
       
       return new Response(html, {
-        headers: {
-          'Content-Type': 'text/html; charset=utf-8',
-          'Access-Control-Allow-Origin': '*'
-        }
+        headers: { 'Content-Type': 'text/html; charset=utf-8', 'Access-Control-Allow-Origin': '*' }
       });
     }
     
     return new Response('Go to /player?game=PATH', {
-      headers: {
-        'Content-Type': 'text/plain',
-        'Access-Control-Allow-Origin': '*'
-      }
+      headers: { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' }
     });
   }
 };
