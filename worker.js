@@ -1,21 +1,51 @@
 // ================================================================
-// 🚀 AJ SPORTS 2026 - ULTIMATE EDGE WORKER (نسخه بدون محدودیت KV)
+// 🚀 AJ SPORTS 2026 - ULTIMATE EDGE WORKER (نسخه نهایی و بدون خطا)
 // ================================================================
 
-// ─── Rate Limiting In-Memory (جایگزین KV) ────────────────────
+// ─── Rate Limiting In-Memory ──────────────────────────────────
 const rateLimitCache = new Map();
-const userCache = new Map();
-const fallbackCache = new Map();
 
-// ─── Cleanup هر ۵ دقیقه ──────────────────────────────────────
-setInterval(() => {
+// ─── Helper Functions ──────────────────────────────────────────
+
+function tokenBucketRateLimit(ip) {
   const now = Date.now();
-  for (const [key, data] of rateLimitCache) {
-    if (now - data.lastRefill > 60000) {
-      rateLimitCache.delete(key);
-    }
+  let bucket = rateLimitCache.get(ip);
+  
+  if (!bucket) {
+    bucket = { tokens: 100, lastRefill: now, limit: 100 };
+    rateLimitCache.set(ip, bucket);
   }
-}, 300000);
+  
+  const timePassed = (now - bucket.lastRefill) / 1000;
+  const tokensToAdd = timePassed * 2;
+  bucket.tokens = Math.min(bucket.limit, bucket.tokens + tokensToAdd);
+  bucket.lastRefill = now;
+  
+  if (bucket.tokens < 1) {
+    return {
+      allowed: false,
+      retryAfter: Math.ceil((1 - bucket.tokens) / 2),
+    };
+  }
+  
+  bucket.tokens -= 1;
+  return { allowed: true };
+}
+
+function buildCacheKey(url) {
+  return `cache:${url.pathname}${url.search || ''}`;
+}
+
+function getTTL(path) {
+  if (path.startsWith('/api/tweets/feed')) return 15;
+  if (path.startsWith('/api/users/profile')) return 60;
+  if (path.startsWith('/api/tweets/search')) return 20;
+  if (path.startsWith('/api/tweets/hashtag')) return 45;
+  if (path.startsWith('/api/stories')) return 10;
+  return 30;
+}
+
+// ─── Main Worker ──────────────────────────────────────────────
 
 export default {
   async fetch(request, env, ctx) {
@@ -28,7 +58,7 @@ export default {
     // ۱. Rate Limiting (In-Memory - بدون KV)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     
-    const rateResult = await tokenBucketRateLimit(request, ip);
+    const rateResult = tokenBucketRateLimit(ip);
     if (!rateResult.allowed) {
       return new Response(JSON.stringify({
         error: 'Too Many Requests',
@@ -46,7 +76,6 @@ export default {
     // ۲. Cache (RAM First, KV Only For Important Data)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     
-    // ۲.۱ فقط برای درخواست‌های GET
     if (method === 'GET') {
       const cacheKey = buildCacheKey(url);
       
@@ -67,7 +96,6 @@ export default {
       try {
         const kvData = await env.AJCACHE.get(cacheKey, 'json');
         if (kvData && kvData.expires > Date.now()) {
-          // ذخیره در RAM برای دفعه بعد
           ctx.waitUntil(
             caches.default.put(cacheKey, new Response(JSON.stringify(kvData.data), {
               status: 200,
@@ -134,55 +162,24 @@ export default {
   },
   
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // ⏰ Scheduled (کمتر کردن KV استفاده)
+  // ⏰ Scheduled (Keep-Alive + Cleanup)
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   
   async scheduled(event, env, ctx) {
+    // ۱. Keep-Alive
     try {
       await fetch(env.RENDER_URL + '/api/health');
       console.log('✅ Keep-Alive OK');
     } catch (error) {
       console.error('❌ Keep-Alive failed:', error);
     }
+    
+    // ۲. Cleanup Rate Limit Cache
+    const now = Date.now();
+    for (const [key, data] of rateLimitCache) {
+      if (now - data.lastRefill > 60000) {
+        rateLimitCache.delete(key);
+      }
+    }
   }
 };
-
-// ─── Helper Functions ──────────────────────────────────────────
-
-function tokenBucketRateLimit(request, ip) {
-  const now = Date.now();
-  let bucket = rateLimitCache.get(ip);
-  
-  if (!bucket) {
-    bucket = { tokens: 100, lastRefill: now, limit: 100 };
-    rateLimitCache.set(ip, bucket);
-  }
-  
-  const timePassed = (now - bucket.lastRefill) / 1000;
-  const tokensToAdd = timePassed * 2;
-  bucket.tokens = Math.min(bucket.limit, bucket.tokens + tokensToAdd);
-  bucket.lastRefill = now;
-  
-  if (bucket.tokens < 1) {
-    return {
-      allowed: false,
-      retryAfter: Math.ceil((1 - bucket.tokens) / 2),
-    };
-  }
-  
-  bucket.tokens -= 1;
-  return { allowed: true };
-}
-
-function buildCacheKey(url) {
-  return `cache:${url.pathname}${url.search || ''}`;
-}
-
-function getTTL(path) {
-  if (path.startsWith('/api/tweets/feed')) return 15;
-  if (path.startsWith('/api/users/profile')) return 60;
-  if (path.startsWith('/api/tweets/search')) return 20;
-  if (path.startsWith('/api/tweets/hashtag')) return 45;
-  if (path.startsWith('/api/stories')) return 10;
-  return 30;
-}
